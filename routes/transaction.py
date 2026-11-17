@@ -2,7 +2,14 @@
 import asyncio
 
 import aiosqlite
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    status
+)
 
 from database import DATABASE_NAME, get_db
 from models import TransactionCreate
@@ -12,43 +19,50 @@ router = APIRouter(
     tags=["Transactions"]
 )
 
+# Menghindari pemrosesan bersamaan dalam satu proses aplikasi
 stock_lock = asyncio.Lock()
 
 
+# Memproses transaksi di background
 async def process_transaction(transaction_id: int):
     async with stock_lock:
         async with aiosqlite.connect(DATABASE_NAME) as db:
-            db.row_factory = aiosqlite.Row
+            try:
+                db.row_factory = aiosqlite.Row
 
-            cursor = await db.execute(
-                "SELECT * FROM transactions WHERE id = ?",
-                (transaction_id,)
-            )
-            transaction = await cursor.fetchone()
+                # Memulai transaksi database
+                await db.execute("BEGIN IMMEDIATE")
 
-            if transaction is None:
-                return
+                # Mengambil data transaksi
+                cursor = await db.execute(
+                    "SELECT * FROM transactions WHERE id = ?",
+                    (transaction_id,)
+                )
 
-            if transaction["status"] != "pending":
-                return
+                transaction = await cursor.fetchone()
 
-            await db.execute(
-                "UPDATE transactions SET status = 'processing' WHERE id = ?",
-                (transaction_id,)
-            )
-            await db.commit()
+                if transaction is None:
+                    await db.rollback()
+                    return
 
-            await asyncio.sleep(0.1)
+                if transaction["status"] != "pending":
+                    await db.rollback()
+                    return
 
-            cursor = await db.execute(
-                "SELECT stok FROM alat_tulis WHERE id = ?",
-                (transaction["alat_tulis_id"],)
-            )
-            alat_tulis = await cursor.fetchone()
+                # Mengubah status menjadi processing
+                await db.execute(
+                    """
+                    UPDATE transactions
+                    SET status = 'processing'
+                    WHERE id = ?
+                    """,
+                    (transaction_id,)
+                )
 
-            if alat_tulis is None:
-                status = "failed"
-            else:
+                # Simulasi proses transaksi
+                await asyncio.sleep(0.1)
+
+                # Mengurangi stok jika stok mencukupi
                 cursor = await db.execute(
                     """
                     UPDATE alat_tulis
@@ -62,88 +76,149 @@ async def process_transaction(transaction_id: int):
                     )
                 )
 
-                status = "completed" if cursor.rowcount == 1 else "failed"
+                # Menentukan status transaksi
+                if cursor.rowcount == 1:
+                    final_status = "completed"
+                else:
+                    final_status = "failed"
 
-            await db.execute(
-                "UPDATE transactions SET status = ? WHERE id = ?",
-                (status, transaction_id)
-            )
-            await db.commit()
+                # Memperbarui status akhir transaksi
+                await db.execute(
+                    """
+                    UPDATE transactions
+                    SET status = ?
+                    WHERE id = ?
+                    """,
+                    (final_status, transaction_id)
+                )
+
+                await db.commit()
+
+            except aiosqlite.Error:
+                await db.rollback()
+                raise
+
+            except Exception:
+                await db.rollback()
+                raise
 
 
-@router.post("/", status_code=202)
+# POST: Membuat transaksi baru
+@router.post("/", status_code=status.HTTP_202_ACCEPTED)
 async def create_transaction(
     data: TransactionCreate,
     background_tasks: BackgroundTasks,
     db: aiosqlite.Connection = Depends(get_db)
 ):
+    # Memastikan barang tersedia
     cursor = await db.execute(
         "SELECT id FROM alat_tulis WHERE id = ?",
         (data.alat_tulis_id,)
     )
 
-    if await cursor.fetchone() is None:
+    alat_tulis = await cursor.fetchone()
+
+    if alat_tulis is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Alat tulis tidak ditemukan"
         )
 
-    cursor = await db.execute(
-        """
-        INSERT INTO transactions (alat_tulis_id, jumlah, status)
-        VALUES (?, ?, 'pending')
-        """,
-        (data.alat_tulis_id, data.jumlah)
-    )
-    await db.commit()
+    # Membuat transaksi dengan status pending
+    try:
+        cursor = await db.execute(
+            """
+            INSERT INTO transactions (
+                alat_tulis_id,
+                jumlah,
+                status
+            )
+            VALUES (?, ?, 'pending')
+            """,
+            (data.alat_tulis_id, data.jumlah)
+        )
 
-    transaction_id = cursor.lastrowid
+        await db.commit()
 
+        transaction_id = cursor.lastrowid
+
+    except aiosqlite.Error:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gagal membuat transaksi"
+        )
+
+    # Menjalankan pemrosesan di background
     background_tasks.add_task(
         process_transaction,
         transaction_id
     )
 
     return {
-        "pesan": "Transaksi diterima dan sedang menunggu proses",
+        "pesan": "Transaksi berhasil diterima",
         "transaction_id": transaction_id,
         "status": "pending"
     }
 
 
+# GET: Menampilkan semua transaksi
 @router.get("/")
 async def get_transactions(
-    status: str = None,
+    status_filter: str = Query(
+        default=None,
+        alias="status",
+        pattern="^(pending|processing|completed|failed)$"
+    ),
     db: aiosqlite.Connection = Depends(get_db)
 ):
-    if status:
+    if status_filter:
         cursor = await db.execute(
-            "SELECT * FROM transactions WHERE status = ? ORDER BY id DESC",
-            (status,)
+            """
+            SELECT * FROM transactions
+            WHERE status = ?
+            ORDER BY id DESC
+            """,
+            (status_filter,)
         )
     else:
         cursor = await db.execute(
-            "SELECT * FROM transactions ORDER BY id DESC"
+            """
+            SELECT * FROM transactions
+            ORDER BY id DESC
+            """
         )
 
     data = await cursor.fetchall()
+
     return [dict(row) for row in data]
 
 
+# GET: Menampilkan transaksi berdasarkan ID
 @router.get("/{transaction_id}")
 async def get_transaction(
     transaction_id: int,
     db: aiosqlite.Connection = Depends(get_db)
 ):
+    if transaction_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID transaksi harus lebih dari 0"
+        )
+
     cursor = await db.execute(
-        "SELECT * FROM transactions WHERE id = ?",
+        """
+        SELECT * FROM transactions
+        WHERE id = ?
+        """,
         (transaction_id,)
     )
+
     data = await cursor.fetchone()
 
     if data is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Transaksi tidak ditemukan"
         )
 
