@@ -1,87 +1,117 @@
 
 import asyncio
-import time
+import argparse
 import statistics
-import math
+import time
+
 import httpx
 
 
-BASE_URL = "http://127.0.0.1:8000"
-ENDPOINT = "/alat-tulis/"
-TOTAL_REQUESTS = 100
-CONCURRENCY = 10
+async def send_request(client, url, semaphore):
+    async with semaphore:
+        start = time.perf_counter()
+
+        try:
+            response = await client.get(url)
+            elapsed = (time.perf_counter() - start) * 1000
+
+            return {
+                "success": response.is_success,
+                "status": response.status_code,
+                "time": elapsed
+            }
+
+        except httpx.HTTPError as error:
+            elapsed = (time.perf_counter() - start) * 1000
+
+            return {
+                "success": False,
+                "status": str(error),
+                "time": elapsed
+            }
 
 
-async def benchmark():
-    latencies = []
-    success = 0
-    failed = 0
-    semaphore = asyncio.Semaphore(CONCURRENCY)
+async def run_benchmark(url, total_requests, concurrency):
+    semaphore = asyncio.Semaphore(concurrency)
 
-    async with httpx.AsyncClient(
-        base_url=BASE_URL,
-        timeout=10
-    ) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        print("\nMemulai benchmark...")
+        print(f"URL         : {url}")
+        print(f"Total       : {total_requests}")
+        print(f"Concurrency : {concurrency}\n")
 
-        # Pemanasan awal, tidak dihitung dalam hasil
-        for _ in range(5):
-            await client.get(ENDPOINT)
+        start = time.perf_counter()
 
-        async def send_request():
-            nonlocal success, failed
+        tasks = [
+            send_request(client, url, semaphore)
+            for _ in range(total_requests)
+        ]
 
-            async with semaphore:
-                start = time.perf_counter()
+        results = await asyncio.gather(*tasks)
 
-                try:
-                    response = await client.get(ENDPOINT)
-                    elapsed = time.perf_counter() - start
-                    latencies.append(elapsed * 1000)
+        duration = time.perf_counter() - start
 
-                    if response.status_code == 200:
-                        success += 1
-                    else:
-                        failed += 1
+    successful = [r for r in results if r["success"]]
+    failed = [r for r in results if not r["success"]]
 
-                except httpx.RequestError:
-                    failed += 1
+    response_times = sorted(r["time"] for r in results)
 
-        start_all = time.perf_counter()
+    average = statistics.mean(response_times)
+    minimum = min(response_times)
+    maximum = max(response_times)
 
-        await asyncio.gather(
-            *[send_request() for _ in range(TOTAL_REQUESTS)]
-        )
+    p95_index = max(0, int(len(response_times) * 0.95) - 1)
+    p95 = response_times[p95_index]
 
-        total_time = time.perf_counter() - start_all
+    rps = total_requests / duration if duration > 0 else 0
 
-    print("\n===== HASIL BENCHMARK TOKO ALAT TULIS =====")
-    print(f"Total Request       : {TOTAL_REQUESTS}")
-    print(f"Concurrency         : {CONCURRENCY}")
-    print(f"Berhasil            : {success}")
-    print(f"Gagal               : {failed}")
-    print(f"Total Waktu         : {total_time:.3f} detik")
-
-    if latencies:
-        sorted_latency = sorted(latencies)
-        p95_index = math.ceil(0.95 * len(sorted_latency)) - 1
-
-        print(
-            f"Rata-rata Respons   : "
-            f"{statistics.mean(latencies):.2f} ms"
-        )
-        print(
-            f"Median Respons      : "
-            f"{statistics.median(latencies):.2f} ms"
-        )
-        print(
-            f"P95 Respons         : "
-            f"{sorted_latency[p95_index]:.2f} ms"
-        )
-        print(
-            f"Throughput          : "
-            f"{success / total_time:.2f} request/detik"
-        )
+    print("========== HASIL BENCHMARK ==========")
+    print(f"Total Request       : {total_requests}")
+    print(f"Request Berhasil    : {len(successful)}")
+    print(f"Request Gagal       : {len(failed)}")
+    print(f"Total Waktu         : {duration:.2f} detik")
+    print(f"Rata-rata Response  : {average:.2f} ms")
+    print(f"Response Tercepat   : {minimum:.2f} ms")
+    print(f"Response Terlambat  : {maximum:.2f} ms")
+    print(f"P95 Response Time   : {p95:.2f} ms")
+    print(f"Requests per Second : {rps:.2f} RPS")
+    print("=====================================")
 
 
 if __name__ == "__main__":
-    asyncio.run(benchmark())
+    parser = argparse.ArgumentParser(
+        description="Benchmark Toko Alat Tulis API"
+    )
+
+    parser.add_argument(
+        "--url",
+        default="http://127.0.0.1:8000/alat-tulis/",
+        help="Endpoint API yang akan diuji"
+    )
+
+    parser.add_argument(
+        "--requests",
+        type=int,
+        default=100,
+        help="Jumlah request"
+    )
+
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=10,
+        help="Jumlah request bersamaan"
+    )
+
+    args = parser.parse_args()
+
+    if args.requests < 1 or args.concurrency < 1:
+        parser.error("Requests dan concurrency harus lebih dari 0")
+
+    asyncio.run(
+        run_benchmark(
+            args.url,
+            args.requests,
+            args.concurrency
+        )
+    )
