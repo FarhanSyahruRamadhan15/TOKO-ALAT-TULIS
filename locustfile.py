@@ -11,7 +11,17 @@ class TokoAlatTulisUser(HttpUser):
 
     @task(2)
     def lihat_detail_alat_tulis(self):
-        self.client.get("/alat-tulis/1")
+        response = self.client.get("/alat-tulis/")
+
+        if response.status_code == 200:
+            data = response.json()
+
+            if data:
+                alat_tulis_id = data[0]["id"]
+
+                self.client.get(
+                    f"/alat-tulis/{alat_tulis_id}"
+                )
 
     @task(1)
     def lihat_transaksi(self):

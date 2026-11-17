@@ -7,11 +7,16 @@ DATABASE_NAME = "toko_alat_tulis.db"
 async def get_db():
     async with aiosqlite.connect(DATABASE_NAME) as db:
         db.row_factory = aiosqlite.Row
+
+        await db.execute("PRAGMA foreign_keys = ON")
+
         yield db
 
 
 async def init_db():
     async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS alat_tulis (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,7 +34,8 @@ async def init_db():
                 jumlah INTEGER NOT NULL CHECK (jumlah > 0),
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (alat_tulis_id) REFERENCES alat_tulis(id)
+                FOREIGN KEY (alat_tulis_id)
+                    REFERENCES alat_tulis(id)
             )
         """)
 

@@ -22,6 +22,8 @@ async def seed_data():
     ]
 
     async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+
         cursor = await db.execute(
             "SELECT COUNT(*) FROM alat_tulis"
         )
@@ -30,13 +32,16 @@ async def seed_data():
         if jumlah_data == 0:
             await db.executemany(
                 """
-                INSERT INTO alat_tulis (nama, kategori, harga, stok)
+                INSERT INTO alat_tulis
+                (nama, kategori, harga, stok)
                 VALUES (?, ?, ?, ?)
                 """,
                 data_alat_tulis
             )
+
             await db.commit()
             print("Berhasil menambahkan 10 data alat tulis.")
+
         else:
             print("Data alat tulis sudah tersedia. Seed dilewati.")
 
