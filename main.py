@@ -16,17 +16,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Toko Alat Tulis API",
-    description="REST API untuk pengelolaan alat tulis dan transaksi",
+    description=(
+        "REST API untuk pengelolaan data alat tulis, "
+        "stok barang, dan transaksi penjualan."
+    ),
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/docs"
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 
-@app.get("/", include_in_schema=False)
+@app.get("/", tags=["Home"])
 async def home():
     return {
-        "pesan": "Selamat Datang di Toko Alat Tulis"
+        "status": "success",
+        "pesan": "Selamat Datang di Toko Alat Tulis API",
+        "versi": "1.0.0",
+        "dokumentasi": "/docs"
     }
 
 
